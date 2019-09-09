@@ -116,7 +116,7 @@ class Tester(object):
         return results
 
 
-class ExperimentIO(object):  # todo: fix the loading method.
+class ExperimentIO(object):
 
     def __init__(self):
         pass
@@ -140,7 +140,7 @@ class ExperimentIO(object):  # todo: fix the loading method.
     def save_checkpoint(model, optimizer, current_epoch, dirname):
         state = dict()
         state['network'] = model.state_dict()  # save network parameter and other variables.
-        state['init_params'] = model.init_params
+        state['init_params'] = model.__dict__
         state['optimizer'] = optimizer.state_dict()
 
         filename = os.path.join(dirname, 'epoch_{}'.format(current_epoch))
