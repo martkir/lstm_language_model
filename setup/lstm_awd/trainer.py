@@ -6,11 +6,16 @@ import math
 import os
 import torch
 import sys
-import torch.nn as nn
+
+"""
+additional features:
+- rescaling the learning rate.
+- sampler iterates over variable sized chunks.
+"""
 
 
 class Sampler(object):
-    def __init__(self, x, chunk_size, skip_size, batch_size, shuffle_first=False):
+    def __init__(self, x, avg_chunk_size, skip_size, batch_size, shuffle_first=False):
         """ Responsible for providing data chunks to the <Trainer> class.
 
         A training iteration in a LSTM language model consists of processing a "chunk". This class supplies the
@@ -18,19 +23,16 @@ class Sampler(object):
 
         Args:
             x(tensor): Shape (seq_len, 1). Sequence of word indices corresponding to corpus.
-            chunk_size(int): The maximum size of a chunk. Corresponds to the look-back period of TBPTT (K2 parameter).
-            skip_size(int): The K1 parameter in TBPTT.
+            chunk_size(int): The maximum size of a chunk.
             batch_size(int): The number of batches to divide <x> into.
             shuffle_first(bool): Whether to shuffle the list of chunks first before processing them.
         """
-
-        self.batch_size = batch_size
-        self.chunk_size = chunk_size
+        self.x = x
+        self.avg_chunk_size = avg_chunk_size
         self.skip_size = skip_size
-
-        self.chunk_list = self._create_chunk_list(x)
-        self.chunk_list_copy = self.chunk_list
-
+        self.batch_size = batch_size
+        self.data_list = self._create_chunk_list()
+        self.data_copy = self.data_list
         self.shuffle_first = shuffle_first
         self.reset()
 
@@ -41,54 +43,70 @@ class Sampler(object):
         return self.sample()
 
     def __len__(self):
-        return len(self.chunk_list_copy)
+        actual = len(self.data_copy) / self.batch_size
+        rounded = len(self.data_copy) // self.batch_size
+        if actual - rounded == 0:
+            return rounded
+        return rounded + 1
 
     def sample(self):
         if self.has_next():
-            batch = self.chunk_list[:1]  # return top
-            self.chunk_list = self.chunk_list[1:]  # remove top
-            return batch[0]
+            batch = self.data_list[:self.batch_size] # return top
+            self.data_list = self.data_list[self.batch_size:] # remove top
+            return batch
         else:
             raise StopIteration()
 
     def has_next(self):
-        if len(self.chunk_list) > 0:
+        if len(self.data_list) > 0:
             return True
         self.reset()  # fill up again for next time you want to iterate over it.
         return False
 
     def reset(self):
-        self.chunk_list = self.chunk_list_copy
+        self.data_list = self._create_chunk_list()
+        self.data_copy = self.data_list
         if self.shuffle_first:
             self.shuffle()
 
     def shuffle(self):
-        perm = np.random.permutation(len(self.chunk_list))
-        self.chunk_list = [self.chunk_list[i] for i in perm]
+        perm = np.random.permutation(len(self.data_list))
+        self.data_list = [self.data_list[i] for i in perm]
 
-    def _create_chunk_list(self, x):
+    def _create_chunk_list(self):
         """
+        Different from other <lstm.Sampler> this sampler creates variable length chunks.
+
+        Args:
+            x(tensor): Shape (seq_len, 1).
+            chunk_size(int): This corresponds to the look-back period of truncated BPTT i.e. the K2 parameter.
+            skip_size(int): The number of time steps to skip in truncated BPTT i.e. the K1 parameter.
+
         Returns:
             chunk_list(list): [chunk(tensor)]; chunk shape (chunk_size, batch_size) or (remainder, batch_size).
         """
 
-        x = self._batchify(x, self.batch_size)  # shape (new_seq_len, batch_size)
+        x = self._batchify(self.x, self.batch_size)  # shape (new_seq_len, batch_size)
 
         chunk_list = []
         create_chunk_is_possible = True
-        boundary = [0, self.chunk_size]
+
+        chunk_size = max(5, int(np.random.normal(self.avg_chunk_size, 5)))
+        time = 0
 
         while create_chunk_is_possible:
-            inputs = x[boundary[0]: boundary[1]]
-            targets = x[boundary[0] + 1: boundary[1] + 1]
+            inputs = x[time: time + chunk_size]
+            targets = x[time + 1: time + chunk_size + 1].reshape(-1)
 
             if inputs.shape[0] > 1:
-                if inputs.shape[0] < self.chunk_size:
-                    inputs = inputs[:-1]  # make sure inputs has same size as targets.
-
+                if inputs.shape[0] < chunk_size:
+                    inputs = input[:-1]  # make sure inputs has same size as targets.
                 chunk = (inputs, targets)
                 chunk_list.append(chunk)
-                boundary = [boundary[0] + self.skip_size, boundary[1] + self.skip_size]
+
+                time += self.skip_size
+                chunk_size = max(5, int(np.random.normal(self.avg_chunk_size, 5)))
+
             else:
                 create_chunk_is_possible = False
 
@@ -103,40 +121,42 @@ class Sampler(object):
         Returns:
             x(tensor): shape (seq_len, batch_size).
         """
-
         seq_len = x.shape[0] // batch_size
         x = x.narrow(0, 0, batch_size * seq_len)  # (seq_len * batch_size, 1).
         x = x.reshape(seq_len, batch_size)  # (seq_len, batch_size)
         return x
 
 
-class Trainer(object):
-    def __init__(self, sampler, vocab_size, device):
-        self.sampler = sampler
+class Handler(object):
+    def __init__(self, criterion, vocab_size):
+        self.criterion = criterion
         self.vocab_size = vocab_size
-        self.device = device
-        self.criterion = nn.CrossEntropyLoss()
 
     def compute_loss(self, scores, targets):
         loss = self.criterion(scores.reshape(-1, self.vocab_size), targets)
         return loss
 
-    def repackage_hidden(self, h):
-        """Wraps hidden states in new Tensors,
-        to detach them from their history."""
-        if isinstance(h, torch.Tensor):
-            return h.detach()
-        else:
-            return [self.repackage_hidden(v) for v in h]
-
-    def _train_iter(self, chunk, hidden_list, model, optimizer):
-        model.train()
+    @staticmethod
+    def process_chunk(chunk, model):
         inputs, targets = chunk
         inputs = inputs.to(device=model.device)
-        targets = inputs.to(device=model.device)  # (chunk_size, batch_size)
-        hidden_list = self.repackage_hidden(hidden_list)  # detach hidden.
-        scores, hidden_list = model.forward(inputs, hidden_list)  # scores: (chunk_size, batch_size, vocab_size)
-        loss = self.criterion(scores.reshape(-1, self.vocab_size), targets.reshape(-1))
+        targets = inputs.to(device=model.device)
+        return inputs, targets
+
+
+class Trainer(object):
+    def __init__(self, sampler, handler, device):
+        self.sampler = sampler
+        self.device = device
+        self.handler = handler
+
+    def _train_iter(self, chunk, hidden_list, model, optimizer):
+        # todo: starting each bactch you have to detach.
+
+        model.train()
+        inputs, targets = self.handler.process_chunk(chunk, model)
+        scores, hidden_list = model.forward(inputs, hidden_list)
+        loss = self.handler.compute_loss(scores, targets)
 
         optimizer.zero_grad()
         loss.backward()
@@ -156,14 +176,100 @@ class Trainer(object):
 
         with tqdm(total=len(self.sampler)) as pbar_train:
             for i, chunk in enumerate(self.sampler):
+                lr = optimizer.param_groups[0]['lr']
+                optimizer.param_groups[0]['lr'] = lr * chunk[0].shape[0] / self.sampler.avg_chunk_size
                 output, hidden_list, model, optimizer = self._train_iter(chunk, hidden_list, model, optimizer)
 
                 for k, v in output.items():
                     batch_stats[k].append(output[k])
 
-                description = 'epoch: {} '.format(current_epoch)
+                description = 'epoch: {}'.format(current_epoch)
                 description += ' '.join(["{}: {:.4f}".format(k, np.mean(v)) for k, v in batch_stats.items()])
-                # description += 'lr: {}'.format(optimizer.params_group[0]['lr'])
+                description += 'lr: {}'.format(optimizer.params_group[0]['lr'])
+
+                pbar_train.update(1)
+                pbar_train.set_description(description)
+
+        for k, v in batch_stats.items():
+            epoch_stats[k] = np.around(np.mean(v), decimals=4)
+
+        return model, optimizer, epoch_stats
+
+
+class TrainerAWD(object):
+    def __init__(self, data, avg_chunk_size, handler, device):
+        self.device = device
+        self.handler = handler
+        self.data = data
+        self.avg_chunk_size = avg_chunk_size
+
+    def _train_iter(self, chunk, hidden_list, model, optimizer):
+        # todo: starting each bactch you have to detach.
+
+        model.train()
+        inputs, targets = self.handler.process_chunk(chunk, model)
+        scores, hidden_list = model.forward(inputs, hidden_list)
+        loss = self.handler.compute_loss(scores, targets)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        stats_dict = {
+            'train_loss': loss.data.cpu().numpy(),
+            'train_ppl': math.exp(loss.data.cpu().numpy())  # perplexity.
+        }
+
+        return stats_dict, hidden_list, model, optimizer
+
+    def get_batch(self, data, i, seq_len=None):
+        seq_len = min(seq_len if seq_len else self.avg_chunk_size, len(data) - 1 - i)
+        inputs = data[i:i + seq_len]
+        targets = data[i + 1:i + 1 + seq_len].view(-1)
+        return inputs, targets
+
+    def repackage_hidden(self, h):
+        """Wraps hidden states in new Tensors,
+        to detach them from their history."""
+        if isinstance(h, torch.Tensor):
+            return h.detach()
+        else:
+            return [self.repackage_hidden(v) for v in h]
+
+    def __call__(self, model, optimizer, current_epoch):
+
+        hidden_list = model.init_hidden_list()
+
+        with tqdm(total=self.data.shape[0] - 1 - 1) as pbar_train:
+            for i in enumerate(self.data.shape[0] - 1 - 1):
+                chunk_size = self.avg_chunk_size if np.random.random() < 0.95 else self.avg_chunk_size / 2.
+                chunk_size = max(5, int(np.random.normal(chunk_size, 5)))
+                lr = optimizer.param_groups[0]['lr']
+                optimizer.param_groups[0]['lr'] = lr * chunk_size / self.avg_chunk_size  # rescale learning rate.
+                model.train()
+                inputs, targets = self.get_batch(self.data, i, seq_len=chunk_size)
+                hidden_list = self.repackage_hidden(hidden_list)
+                optimizer.zero_grad()
+
+                # now some model specific stuff:
+
+        #### OLD:
+        batch_stats = defaultdict(lambda: [])
+        epoch_stats = OrderedDict({})
+        hidden_list = model.init_hidden_list(self.sampler.batch_size)
+
+        with tqdm(total=len(self.sampler)) as pbar_train:
+            for i, chunk in enumerate(self.sampler):
+                lr = optimizer.param_groups[0]['lr']
+                optimizer.param_groups[0]['lr'] = lr * chunk[0].shape[0] / self.sampler.avg_chunk_size
+                output, hidden_list, model, optimizer = self._train_iter(chunk, hidden_list, model, optimizer)
+
+                for k, v in output.items():
+                    batch_stats[k].append(output[k])
+
+                description = 'epoch: {}'.format(current_epoch)
+                description += ' '.join(["{}: {:.4f}".format(k, np.mean(v)) for k, v in batch_stats.items()])
+                description += 'lr: {}'.format(optimizer.params_group[0]['lr'])
 
                 pbar_train.update(1)
                 pbar_train.set_description(description)
@@ -176,23 +282,20 @@ class Trainer(object):
 
 class Tester(object):
 
-    def __init__(self, sampler, vocab_size, device):
+    def __init__(self, sampler, handler, device):
         self.sampler = sampler
-        self.vocab_size = vocab_size
+        self.handler = handler
         self.device = device
-        self.criterion = nn.CrossEntropyLoss()
 
     def _valid_iter(self, chunk, hidden_list, model):
         model.eval()
-        inputs, targets = chunk
-        inputs = inputs.to(device=model.device)
-        targets = inputs.to(device=model.device)  # (chunk_size, batch_size)
+        inputs, targets = self.handler.process_chunk(chunk, model)
         scores, hidden_list = model.forward(inputs, hidden_list)
-        loss = self.criterion(scores.reshape(-1, self.vocab_size), targets.reshape(-1))
+        loss = self.handler.compute_loss(scores, targets)
 
         stats_dict = {
-            'valid_loss': loss.data.cpu().numpy(),
-            'valid_ppl': math.exp(loss.data.cpu().numpy())  # perplexity.
+            'train_loss': loss.data.cpu().numpy(),
+            'train_ppl': math.exp(loss.data.cpu().numpy())  # perplexity.
         }
 
         return stats_dict, hidden_list
@@ -200,15 +303,15 @@ class Tester(object):
     def __call__(self, model, current_epoch):
         batch_stats = defaultdict(lambda: [])
         results = OrderedDict({})
-        hidden_list = model.init_hidden_list(self.sampler.batch_size)
+        hidden_list = self.handler.init_hidden_list(self.sampler.batch_size)
 
         with tqdm(total=len(self.sampler)) as pbar:
             for i, chunk in enumerate(self.sampler):
-                stats_dict, hidden_list = self._valid_iter(chunk, hidden_list, model)
+                stats_dict, hidden_list = self._valid_iter(model, chunk, hidden_list)
                 for k, v in stats_dict.items():
                     batch_stats[k].append(stats_dict[k])
 
-                description = 'epoch: {} '.format(current_epoch)
+                description = 'epoch: {}'.format(current_epoch)
                 description += ' '.join(["{}: {:.4f}".format(k, np.mean(v)) for k, v in batch_stats.items()])
 
                 pbar.update(1)
@@ -286,7 +389,7 @@ class ExperimentIO(object):
             f.write(line + '\n')
 
 
-class Experiment(object):
+class Experiment(object):  # todo: to re-implement.
 
     def __init__(self,
                  model,
@@ -295,7 +398,8 @@ class Experiment(object):
                  trainer_module,
                  tester_module,
                  experiment_dirname,
-                 use_gpu=True):
+                 use_gpu=True,
+                 resume=False):
 
         self.model = model
         self.optimizer = optimizer
@@ -304,6 +408,7 @@ class Experiment(object):
         self.results_filename = os.path.join(experiment_dirname, 'results.txt')
         self.model_dirname = os.path.join(experiment_dirname, 'checkpoints')
         self.device = torch.device('cpu')  # default device is cpu.
+        self.resume = resume
 
         self.trainer_module = trainer_module
         self.tester_module = tester_module
@@ -320,9 +425,24 @@ class Experiment(object):
         print('initialized trainer with device: {}'.format(device_name))
 
     def run(self):
-        for current_epoch in range(self.num_epochs):
+        next_epoch = 0
+        if self.resume:
+            num_lines = sum(1 for _ in open(self.results_filename))
+            if num_lines > 0:
+                start_epoch = num_lines - 2
+                model_filename = os.path.join(self.model_dirname, 'epoch_{}'.format(start_epoch))
+                self.model, self.optimizer = ExperimentIO.load_checkpoint(self.model, self.optimizer, model_filename)
+                self.model.to(device=self.device)
+                next_epoch = start_epoch + 1
+
+        end_epoch = next_epoch + self.num_epochs
+        for current_epoch in range(next_epoch, end_epoch):
+            # valid_results = self.tester_module(self.model, current_epoch)
             self.model, self.optimizer, train_results = self.trainer_module(self.model, self.optimizer, current_epoch)
-            valid_results = self.tester_module(self.model, current_epoch)
+            if current_epoch % 1 == 0 and current_epoch > -1:
+                valid_results = self.tester_module(self.model, current_epoch)
+            else:
+                valid_results = {}
 
             sys.stderr.write('\n')
             results = OrderedDict({})
