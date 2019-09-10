@@ -18,14 +18,19 @@ class Sampler(object):
 
         Args:
             x(tensor): Shape (seq_len, 1). Sequence of word indices corresponding to corpus.
-            chunk_size(int): The maximum size of a chunk.
+            chunk_size(int): The maximum size of a chunk. Corresponds to the look-back period of TBPTT (K2 parameter).
+            skip_size(int): The K1 parameter in TBPTT.
             batch_size(int): The number of batches to divide <x> into.
             shuffle_first(bool): Whether to shuffle the list of chunks first before processing them.
         """
 
-        self.chunk_list = self._create_chunk_list(x, chunk_size, skip_size, batch_size)
-        self.chunk_list_copy = self.chunk_list
         self.batch_size = batch_size
+        self.chunk_size = chunk_size
+        self.skip_size = skip_size
+
+        self.chunk_list = self._create_chunk_list(x)
+        self.chunk_list_copy = self.chunk_list
+
         self.shuffle_first = shuffle_first
         self.reset()
 
@@ -61,34 +66,29 @@ class Sampler(object):
         perm = np.random.permutation(len(self.chunk_list))
         self.chunk_list = [self.chunk_list[i] for i in perm]
 
-    def _create_chunk_list(self, x, chunk_size, batch_size, skip_size=1):
+    def _create_chunk_list(self, x):
         """
-        Args:
-            x(tensor): Shape (seq_len, 1).
-            chunk_size(int): This corresponds to the look-back period of truncated BPTT i.e. the K2 parameter.
-            skip_size(int): The number of time steps to skip in truncated BPTT i.e. the K1 parameter.
-
         Returns:
             chunk_list(list): [chunk(tensor)]; chunk shape (chunk_size, batch_size) or (remainder, batch_size).
         """
 
-        x = self._batchify(x, batch_size)  # shape (new_seq_len, batch_size)
+        x = self._batchify(x, self.batch_size)  # shape (new_seq_len, batch_size)
 
         chunk_list = []
         create_chunk_is_possible = True
-        boundary = [0, chunk_size]
+        boundary = [0, self.chunk_size]
 
         while create_chunk_is_possible:
             inputs = x[boundary[0]: boundary[1]]
             targets = x[boundary[0] + 1: boundary[1] + 1]
 
             if inputs.shape[0] > 1:
-                if inputs.shape[0] < chunk_size:
+                if inputs.shape[0] < self.chunk_size:
                     inputs = inputs[:-1]  # make sure inputs has same size as targets.
 
                 chunk = (inputs, targets)
                 chunk_list.append(chunk)
-                boundary = [boundary[0] + skip_size, boundary[1] + skip_size]
+                boundary = [boundary[0] + self.skip_size, boundary[1] + self.skip_size]
             else:
                 create_chunk_is_possible = False
 
@@ -133,10 +133,10 @@ class Trainer(object):
         model.train()
         inputs, targets = chunk
         inputs = inputs.to(device=model.device)
-        targets = inputs.to(device=model.device)
+        targets = inputs.to(device=model.device)  # (chunk_size, batch_size)
         hidden_list = self.repackage_hidden(hidden_list)  # detach hidden.
-        scores, hidden_list = model.forward(inputs, hidden_list)
-        loss = self.criterion(scores.reshape(-1, self.vocab_size), targets)
+        scores, hidden_list = model.forward(inputs, hidden_list)  # scores: (chunk_size, batch_size, vocab_size)
+        loss = self.criterion(scores.reshape(-1, self.vocab_size), targets.reshape(-1))
 
         optimizer.zero_grad()
         loss.backward()

@@ -1,7 +1,6 @@
 import os
 import torch
 from torch import optim
-import torch.nn as nn
 
 """
 Description:
@@ -61,13 +60,13 @@ class Engine(DefaultEngine):
         tester = Tester(valid_sampler, data.vocab_size, device=torch.device(0))
 
         model = LSTM(
-            input_size=config['model']['input_size'],  # size of embeddings.
-            hidden_size=config['model']['hidden_size'],
+            input_size=config['input_size'],
+            hidden_size=config['hidden_size'],
             vocab_size=data.vocab_size,
-            n_layers=config['model']['n_layers'],
+            n_layers=config['n_layers'],
             device=torch.device(0))
 
-        optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
+        optimizer = optim.Adam(model.parameters(), lr=config['lr'])
 
         training_experiment = Experiment(
             model=model,

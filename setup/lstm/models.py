@@ -25,16 +25,19 @@ class LSTM(nn.Module):
     def forward(self, inputs, hidden_list):
         """
         Args:
-            inputs: shape (seq_len, batch_size, x_dim). corresponds to words.
+            inputs: shape (chunk_size, batch_size). corresponds to word indices.
         """
-        embedded_inputs = self.embedding_layer(inputs)
+
+        embedded_inputs = self.embedding_layer(inputs)  # (chunk_size, batch_size, input_size)
         outputs = embedded_inputs
         new_hidden_list = []
-        for layer_idx, lstm in enumerate(self.rnns):
-            outputs, hidden = lstm(outputs, hidden_list[layer_idx])
+        for layer_idx, lstm in enumerate(self.lstms):
+            outputs, hidden = lstm(outputs, hidden_list[layer_idx])  # (chunk_size, batch_size, hidden_size)
             new_hidden_list.append(hidden)
-        scores = self.scores_layer(outputs.reshape(outputs.shape[0] * outputs.shape[1], outputs.shape[2]))
-        scores = scores.reshape(scores.shape[0], scores.shape[1], scores.shape[2])
+
+        scores = self.scores_layer(outputs.reshape(outputs.shape[0] * outputs.shape[1],
+                                                   outputs.shape[2]))  # (chunk_size * batch_size, vocab_size)
+        scores = scores.reshape(outputs.shape[0], outputs.shape[1], -1)  # (chunk_size, batch_size, vocab_size)
         return scores, new_hidden_list
 
     def init_hidden_list(self, batch_size):
