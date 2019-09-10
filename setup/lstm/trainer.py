@@ -161,7 +161,7 @@ class Trainer(object):
                 for k, v in output.items():
                     batch_stats[k].append(output[k])
 
-                description = 'epoch: {}'.format(current_epoch)
+                description = 'epoch: {} '.format(current_epoch)
                 description += ' '.join(["{}: {:.4f}".format(k, np.mean(v)) for k, v in batch_stats.items()])
                 # description += 'lr: {}'.format(optimizer.params_group[0]['lr'])
 
@@ -205,7 +205,7 @@ class Tester(object):
                 for k, v in stats_dict.items():
                     batch_stats[k].append(stats_dict[k])
 
-                description = 'epoch: {}'.format(current_epoch)
+                description = 'epoch: {} '.format(current_epoch)
                 description += ' '.join(["{}: {:.4f}".format(k, np.mean(v)) for k, v in batch_stats.items()])
 
                 pbar.update(1)
