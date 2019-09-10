@@ -20,6 +20,10 @@ class DefaultEngine(object):
 
         if not os.path.exists(self.checkpoints_parent_dir):
             os.makedirs(self.checkpoints_parent_dir)
+        else:
+            print('experiment directory at {} already exists. delete in order to run.'.
+                  format(self.checkpoints_parent_dir))
+            exit()
 
         # for identifying the config of the experiment:
         config_filename = os.path.join(self.checkpoints_parent_dir, 'config.txt')
