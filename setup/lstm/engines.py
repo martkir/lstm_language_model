@@ -16,14 +16,13 @@ Description:
 
 class DefaultEngine(object):
     def __init__(self, config):
-        trial_parent_dir = config['trial_parent_dir']
-        trial = config['trial']
-        self.checkpoints_parent_dir = os.path.join(trial_parent_dir, 'trial_{}'.format(trial))
+        self.checkpoints_parent_dir = config['experiment_dirname']
         self.training_experiment = None
 
         if not os.path.exists(self.checkpoints_parent_dir):
             os.makedirs(self.checkpoints_parent_dir)
 
+        # for identifying the config of the experiment:
         config_filename = os.path.join(self.checkpoints_parent_dir, 'config.txt')
         with open(config_filename, 'w+') as f:
             for k, v in config.items():
@@ -76,7 +75,7 @@ class Engine(DefaultEngine):
             num_epochs=config['num_epochs'],
             trainer_module=trainer,
             tester_module=tester,
-            experiment_dirname=self.checkpoints_parent_dir,
+            experiment_dirname=config['experiment_dirname'],
             use_gpu=True)
 
         self.add_training_experiment(training_experiment)
