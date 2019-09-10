@@ -6,23 +6,7 @@ import math
 import os
 import torch
 import sys
-
-
-class Handler(object):
-    def __init__(self, criterion, vocab_size):
-        self.criterion = criterion
-        self.vocab_size = vocab_size
-
-    def compute_loss(self, scores, targets):
-        loss = self.criterion(scores.reshape(-1, self.vocab_size), targets)
-        return loss
-
-    @staticmethod
-    def process_chunk(chunk, model):
-        inputs, targets = chunk
-        inputs = inputs.to(device=model.device)
-        targets = inputs.to(device=model.device)
-        return inputs, targets
+import torch.nn as nn
 
 
 class Sampler(object):
@@ -114,7 +98,6 @@ class Sampler(object):
 
         return chunk_list
 
-
     @staticmethod
     def _batchify(x, batch_size):
         """
@@ -132,16 +115,32 @@ class Sampler(object):
 
 
 class Trainer(object):
-    def __init__(self, sampler, handler, device):
+    def __init__(self, sampler, vocab_size, device):
         self.sampler = sampler
+        self.vocab_size = vocab_size
         self.device = device
-        self.handler = handler
+        self.criterion = nn.CrossEntropyLoss()
+
+    def compute_loss(self, scores, targets):
+        loss = self.criterion(scores.reshape(-1, self.vocab_size), targets)
+        return loss
+
+    def repackage_hidden(self, h):
+        """Wraps hidden states in new Tensors,
+        to detach them from their history."""
+        if isinstance(h, torch.Tensor):
+            return h.detach()
+        else:
+            return [self.repackage_hidden(v) for v in h]
 
     def _train_iter(self, chunk, hidden_list, model, optimizer):
         model.train()
-        inputs, targets = self.handler.process_chunk(chunk, model)
+        inputs, targets = chunk
+        inputs = inputs.to(device=model.device)
+        targets = inputs.to(device=model.device)
+        hidden_list = self.repackage_hidden(hidden_list)  # detach hidden.
         scores, hidden_list = model.forward(inputs, hidden_list)
-        loss = self.handler.compute_loss(scores, targets)
+        loss = self.criterion(scores.reshape(-1, self.vocab_size), targets)
 
         optimizer.zero_grad()
         loss.backward()
@@ -168,7 +167,7 @@ class Trainer(object):
 
                 description = 'epoch: {}'.format(current_epoch)
                 description += ' '.join(["{}: {:.4f}".format(k, np.mean(v)) for k, v in batch_stats.items()])
-                description += 'lr: {}'.format(optimizer.params_group[0]['lr'])
+                # description += 'lr: {}'.format(optimizer.params_group[0]['lr'])
 
                 pbar_train.update(1)
                 pbar_train.set_description(description)
@@ -193,8 +192,8 @@ class Tester(object):
         loss = self.handler.compute_loss(scores, targets)
 
         stats_dict = {
-            'train_loss': loss.data.cpu().numpy(),
-            'train_ppl': math.exp(loss.data.cpu().numpy())  # perplexity.
+            'valid_loss': loss.data.cpu().numpy(),
+            'valid_ppl': math.exp(loss.data.cpu().numpy())  # perplexity.
         }
 
         return stats_dict, hidden_list
@@ -288,7 +287,7 @@ class ExperimentIO(object):
             f.write(line + '\n')
 
 
-class Experiment(object):  # todo: to re-implement.
+class Experiment(object):
 
     def __init__(self,
                  model,
