@@ -23,8 +23,8 @@ class Sampler(object):
             shuffle_first(bool): Whether to shuffle the list of chunks first before processing them.
         """
 
-        self.data_list = self._create_chunk_list(x, chunk_size, skip_size, batch_size)
-        self.data_copy = self.data_list
+        self.chunk_list = self._create_chunk_list(x, chunk_size, skip_size, batch_size)
+        self.chunk_list_copy = self.chunk_list
         self.batch_size = batch_size
         self.shuffle_first = shuffle_first
         self.reset()
@@ -36,34 +36,30 @@ class Sampler(object):
         return self.sample()
 
     def __len__(self):
-        actual = len(self.data_copy) / self.batch_size
-        rounded = len(self.data_copy) // self.batch_size
-        if actual - rounded == 0:
-            return rounded
-        return rounded + 1
+        return len(self.chunk_list_copy)
 
     def sample(self):
         if self.has_next():
-            batch = self.data_list[:self.batch_size] # return top
-            self.data_list = self.data_list[self.batch_size:] # remove top
-            return batch
+            batch = self.chunk_list[:1]  # return top
+            self.chunk_list = self.chunk_list[1:]  # remove top
+            return batch[0]
         else:
             raise StopIteration()
 
     def has_next(self):
-        if len(self.data_list) > 0:
+        if len(self.chunk_list) > 0:
             return True
         self.reset()  # fill up again for next time you want to iterate over it.
         return False
 
     def reset(self):
-        self.data_list = self.data_copy
+        self.chunk_list = self.chunk_list_copy
         if self.shuffle_first:
             self.shuffle()
 
     def shuffle(self):
-        perm = np.random.permutation(len(self.data_list))
-        self.data_list = [self.data_list[i] for i in perm]
+        perm = np.random.permutation(len(self.chunk_list))
+        self.chunk_list = [self.chunk_list[i] for i in perm]
 
     def _create_chunk_list(self, x, chunk_size, batch_size, skip_size=1):
         """
@@ -88,7 +84,7 @@ class Sampler(object):
 
             if inputs.shape[0] > 1:
                 if inputs.shape[0] < chunk_size:
-                    inputs = input[:-1]  # make sure inputs has same size as targets.
+                    inputs = inputs[:-1]  # make sure inputs has same size as targets.
 
                 chunk = (inputs, targets)
                 chunk_list.append(chunk)
